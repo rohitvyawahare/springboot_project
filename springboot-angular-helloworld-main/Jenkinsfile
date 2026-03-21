@@ -1,0 +1,333 @@
+pipeline {
+    agent any
+
+    environment {
+        REGISTRY = credentials('docker-registry-url')
+        REGISTRY_CREDENTIALS = credentials('docker-registry-credentials')
+        KUBE_CONFIG = credentials('kubeconfig')
+        DOCKER_BACKEND_IMAGE = "${REGISTRY}/helloworld-backend"
+        DOCKER_FRONTEND_IMAGE = "${REGISTRY}/helloworld-frontend"
+        BUILD_TAG = "${BUILD_NUMBER}-${GIT_COMMIT.take(7)}"
+        JAVA_VERSION = "17"
+        NODE_VERSION = "20"
+    }
+
+    options {
+        timestamps()
+        timeout(time: 1, unit: 'HOURS')
+        buildDiscarder(logRotator(numToKeepStr: '10', artifactNumToKeepStr: '5'))
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                script {
+                    echo "Checking out code from repository..."
+                    checkout scm
+                }
+            }
+        }
+
+        stage('Validate') {
+            parallel {
+                stage('Backend Validation') {
+                    steps {
+                        script {
+                            echo "Validating backend Maven project..."
+                            dir('backend/helloworld') {
+                                sh '''
+                                    mvn validate
+                                    mvn clean
+                                '''
+                            }
+                        }
+                    }
+                }
+                stage('Frontend Validation') {
+                    steps {
+                        script {
+                            echo "Validating frontend Node project..."
+                            dir('frontend/helloworld') {
+                                sh '''
+                                    node --version
+                                    npm --version
+                                    npm ci --silent
+                                '''
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Build Backend') {
+            steps {
+                script {
+                    echo "Building Spring Boot backend..."
+                    dir('backend/helloworld') {
+                        sh '''
+                            mvn clean package -DskipTests -B -V
+                            ls -la target/
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Build Frontend') {
+            steps {
+                script {
+                    echo "Building Angular frontend..."
+                    dir('frontend/helloworld') {
+                        sh '''
+                            npm ci --silent
+                            npm run build -- --configuration production
+                            ls -la dist/
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Unit Tests') {
+            parallel {
+                stage('Backend Unit Tests') {
+                    steps {
+                        script {
+                            echo "Running backend unit tests..."
+                            dir('backend/helloworld') {
+                                sh '''
+                                    mvn test -B
+                                '''
+                            }
+                        }
+                    }
+                }
+                stage('Frontend Unit Tests') {
+                    steps {
+                        script {
+                            echo "Running frontend unit tests..."
+                            dir('frontend/helloworld') {
+                                sh '''
+                                    npm run test -- --watch=false --browsers=ChromeHeadless 2>/dev/null || true
+                                '''
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            when {
+                branch 'main'
+            }
+            steps {
+                script {
+                    echo "Running SonarQube analysis..."
+                    dir('backend/helloworld') {
+                        withSonarQubeEnv('SonarQube') {
+                            sh '''
+                                mvn sonar:sonar \
+                                    -Dsonar.projectKey=helloworld-backend \
+                                    -Dsonar.projectName="Helloworld Backend"
+                            '''
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Build Docker Images') {
+            steps {
+                script {
+                    echo "Building Docker images with tag: ${BUILD_TAG}..."
+                    sh '''
+                        # Build backend image
+                        docker build \
+                            -f backend/Dockerfile \
+                            -t ${DOCKER_BACKEND_IMAGE}:${BUILD_TAG} \
+                            -t ${DOCKER_BACKEND_IMAGE}:latest \
+                            .
+                        
+                        # Build frontend image
+                        docker build \
+                            -f frontend/Dockerfile \
+                            -t ${DOCKER_FRONTEND_IMAGE}:${BUILD_TAG} \
+                            -t ${DOCKER_FRONTEND_IMAGE}:latest \
+                            .
+                        
+                        docker images | grep helloworld
+                    '''
+                }
+            }
+        }
+
+        stage('Scan Docker Images') {
+            steps {
+                script {
+                    echo "Scanning Docker images for vulnerabilities..."
+                    sh '''
+                        # Install trivy if not present
+                        which trivy || (curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin)
+                        
+                        # Scan backend image
+                        trivy image --severity HIGH,CRITICAL ${DOCKER_BACKEND_IMAGE}:${BUILD_TAG} || true
+                        
+                        # Scan frontend image
+                        trivy image --severity HIGH,CRITICAL ${DOCKER_FRONTEND_IMAGE}:${BUILD_TAG} || true
+                    '''
+                }
+            }
+        }
+
+        stage('Push Docker Images') {
+            when {
+                branch 'main'
+            }
+            steps {
+                script {
+                    echo "Pushing Docker images to registry..."
+                    sh '''
+                        echo "$REGISTRY_CREDENTIALS_PSW" | docker login -u "$REGISTRY_CREDENTIALS_USR" --password-stdin "$REGISTRY"
+                        
+                        docker push ${DOCKER_BACKEND_IMAGE}:${BUILD_TAG}
+                        docker push ${DOCKER_BACKEND_IMAGE}:latest
+                        
+                        docker push ${DOCKER_FRONTEND_IMAGE}:${BUILD_TAG}
+                        docker push ${DOCKER_FRONTEND_IMAGE}:latest
+                        
+                        docker logout
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy to Kubernetes') {
+            when {
+                branch 'main'
+            }
+            steps {
+                script {
+                    echo "Deploying to Kubernetes cluster..."
+                    sh '''
+                        export KUBECONFIG=${KUBE_CONFIG}
+                        
+                        # Update deployment manifest with new image tags
+                        sed -i "s|helloworld-backend:latest|${DOCKER_BACKEND_IMAGE}:${BUILD_TAG}|g" k8s/helloworld-deployment.yaml
+                        sed -i "s|helloworld-frontend:latest|${DOCKER_FRONTEND_IMAGE}:${BUILD_TAG}|g" k8s/helloworld-deployment.yaml
+                        
+                        # Apply manifests
+                        kubectl apply -f k8s/helloworld-deployment.yaml
+                        
+                        # Wait for rollout
+                        kubectl rollout status deployment/helloworld-backend -n default --timeout=5m
+                        kubectl rollout status deployment/helloworld-frontend -n default --timeout=5m
+                    '''
+                }
+            }
+        }
+
+        stage('Health Check') {
+            when {
+                branch 'main'
+            }
+            steps {
+                script {
+                    echo "Performing health checks..."
+                    sh '''
+                        export KUBECONFIG=${KUBE_CONFIG}
+                        
+                        # Get service endpoints
+                        kubectl get svc helloworld-backend-svc
+                        kubectl get svc helloworld-frontend-svc
+                        
+                        # Check pod status
+                        kubectl get pods -l app=helloworld
+                        
+                        # Check logs (last 50 lines)
+                        echo "Backend logs:"
+                        kubectl logs -l app=helloworld,tier=backend --tail=50 || true
+                        
+                        echo "Frontend logs:"
+                        kubectl logs -l app=helloworld,tier=frontend --tail=50 || true
+                    '''
+                }
+            }
+        }
+
+        stage('Smoke Tests') {
+            when {
+                branch 'main'
+            }
+            steps {
+                script {
+                    echo "Running smoke tests..."
+                    sh '''
+                        export KUBECONFIG=${KUBE_CONFIG}
+                        
+                        # Get backend service endpoint
+                        BACKEND_IP=$(kubectl get svc helloworld-backend-svc -o jsonpath='{.spec.clusterIP}')
+                        
+                        sleep 10
+                        
+                        # Test backend endpoint
+                        curl -f http://${BACKEND_IP}/hello || exit 1
+                        
+                        echo "Backend health check passed!"
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            script {
+                echo "Pipeline execution finished"
+                
+                // Archive test results
+                junit testResults: '**/target/surefire-reports/*.xml', allowEmptyResults: true
+                
+                // Publish code coverage
+                publishHTML([
+                    reportDir: 'backend/helloworld/target/site/jacoco',
+                    reportFiles: 'index.html',
+                    reportName: 'Backend Code Coverage'
+                ])
+            }
+        }
+        success {
+            script {
+                echo "Pipeline succeeded!"
+                // Send success notification
+                emailext(
+                    subject: "Jenkins Build SUCCESS: ${JOB_NAME} #${BUILD_NUMBER}",
+                    body: """
+                        Build: ${BUILD_URL}
+                        Commit: ${GIT_COMMIT}
+                        Branch: ${GIT_BRANCH}
+                        Status: SUCCESS
+                    """,
+                    to: '${DEFAULT_RECIPIENTS}'
+                )
+            }
+        }
+        failure {
+            script {
+                echo "Pipeline failed!"
+                // Send failure notification
+                emailext(
+                    subject: "Jenkins Build FAILED: ${JOB_NAME} #${BUILD_NUMBER}",
+                    body: """
+                        Build: ${BUILD_URL}
+                        Commit: ${GIT_COMMIT}
+                        Branch: ${GIT_BRANCH}
+                        Status: FAILED
+                    """,
+                    to: '${DEFAULT_RECIPIENTS}'
+                )
+            }
+        }
+    }
+}

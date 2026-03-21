@@ -1,0 +1,4 @@
+-------------------------------------------------------------------------------
+Test set: com.knf.dev.demo.helloworld.HelloworldApplicationTests
+-------------------------------------------------------------------------------
+Tests run: 1, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 3.141 s - in com.knf.dev.demo.helloworld.HelloworldApplicationTests

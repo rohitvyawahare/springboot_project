@@ -1,0 +1,93 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: helloworld-backend
+  labels:
+    app: helloworld
+    tier: backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: helloworld
+      tier: backend
+  template:
+    metadata:
+      labels:
+        app: helloworld
+        tier: backend
+    spec:
+      containers:
+      - name: backend
+        image: helloworld-backend:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+        readinessProbe:
+          httpGet:
+            path: /actuator/health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /actuator/health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 15
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: helloworld-backend-svc
+spec:
+  selector:
+    app: helloworld
+    tier: backend
+  ports:
+  - port: 80
+    targetPort: 8080
+    protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: helloworld-frontend
+  labels:
+    app: helloworld
+    tier: frontend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: helloworld
+      tier: frontend
+  template:
+    metadata:
+      labels:
+        app: helloworld
+        tier: frontend
+    spec:
+      containers:
+      - name: frontend
+        image: helloworld-frontend:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 80
+        env:
+        - name: API_BASE_URL
+          value: "http://helloworld-backend-svc"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: helloworld-frontend-svc
+spec:
+  type: LoadBalancer
+  selector:
+    app: helloworld
+    tier: frontend
+  ports:
+  - port: 80
+    targetPort: 80
+    protocol: TCP

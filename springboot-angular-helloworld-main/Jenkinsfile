@@ -1,0 +1,57 @@
+pipeline {
+    agent any
+
+    tools {
+        jdk 'jdk21'
+        maven 'maven3'
+    }
+    environment {
+        SCANNER HOME = tool 'sonar-scanner'
+    }
+    stages{
+        stage('git checkout') {
+            steps {
+                git branch: 'main',
+                credentialsId: 'Git_token',
+                url: 'https://github.com/rohitvyawahare/springboot_project.git'
+                }
+        }
+        stage('build') {
+            steps {
+                sh 'mvn compile'    
+            }
+        }
+        stage('test') {
+            steps {
+                sh 'mvn test'
+                }
+            }
+        stage('sonarQube analysis') {
+            steps 
+            {
+                withSonarQubeEnv('sonar') {
+                    sh ''' 
+                    $SCANNER_HOME/bin/sonar-scanner \ 
+                        -Dsonar.projectName= Spring-boot-helloworld \ 
+                        -Dsonar.projectKey= Spring-boot-helloworld \ 
+                        -Dsonar.java.binaries=. \ 
+                        -Dsonar.sources=/Users/rohitv/Desktop/springboot-angular-helloworld-main/backend/helloworld/src/main \
+                        -Dsonar.tests=/Users/rohitv/Desktop/springboot-angular-helloworld-main/backend/helloworld/src/test \
+                    '''
+                }
+            }
+        }
+        stage('quality gate') {
+            steps {
+                timeout(time: 1, unit: 'HOURS') {
+                    waitForQualityGate abortPipeline: false, credentials Id: 'sonar_cred'
+                }
+            }
+        }
+        stage('package') {
+            steps {
+                sh 'mvn package'
+            }
+    }
+
+}

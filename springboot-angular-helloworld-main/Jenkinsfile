@@ -11,7 +11,7 @@ pipeline {
     stages{
         stage('git checkout') {
             steps {
-                git branch: 'main',
+                git branch: 'master',
                 credentialsId: 'Git_token',
                 url: 'https://github.com/rohitvyawahare/springboot_project.git'
                 }
@@ -44,7 +44,7 @@ pipeline {
         stage('quality gate') {
             steps {
                 timeout(time: 1, unit: 'HOURS') {
-                    waitForQualityGate abortPipeline: false, credentials Id: 'sonar_cred'
+                    waitForQualityGate abortPipeline: false, credentials Id: 'sonar_cred' 
                 }
             }
         }

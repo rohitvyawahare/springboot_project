@@ -11,7 +11,7 @@ pipeline {
     stages{
         stage('git checkout') {
             steps {
-                gitbranch: 'main',
+                gitbranch: 'master',
                 credentialsId: 'Git_token',
                 url: 'https://github.com/rohitvyawahare/springboot_project.git'
                 }
